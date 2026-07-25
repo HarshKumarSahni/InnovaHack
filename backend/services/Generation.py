@@ -2,6 +2,7 @@
 import google.generativeai as generativeai
 import random
 import time
+import re
 import logging
 import textwrap
 import os
@@ -33,6 +34,8 @@ PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, '..', '..'))
 
 # Build absolute paths to ensure files are always found
 MODEL = os.getenv("GENIE_MODEL", "gemini-2.5-flash-lite")
+MAX_GEMINI_RETRIES = int(os.getenv("MAX_GEMINI_RETRIES", "3"))
+REQUEST_DELAY_SECONDS = int(os.getenv("REQUEST_DELAY_SECONDS", "7"))
 # Ensure only Gemini models are used; coerce/validate to avoid non-gemini model strings
 if MODEL and "gemini" not in MODEL.lower():
     logging.warning("GENIE_MODEL appears to be non-Gemini ('%s'); defaulting to 'gemini-2.5-flash-lite'", MODEL)
@@ -432,6 +435,33 @@ def _extract_response_text(response) -> str:
         return str(response)
 
 
+def _is_rate_limit_error(err_str: str) -> bool:
+    s = (err_str or "").lower()
+    return any(keyword in s for keyword in [
+        "resourceexhausted", "429", "rate limit", "rate_limit", "quota exceeded"
+    ])
+
+
+def _extract_rate_limit_delay(err_str: str) -> Optional[float]:
+    if not err_str:
+        return None
+    match = re.search(r"retry(?:ing)? (?:in|after) (\d+(?:\.\d+)?) seconds", err_str, re.IGNORECASE)
+    if match:
+        try:
+            return float(match.group(1))
+        except ValueError:
+            return None
+    return None
+
+
+def _is_transient_network_error(err_str: str) -> bool:
+    s = (err_str or "").lower()
+    return any(keyword in s for keyword in [
+        "timeout", "timed out", "connection reset", "temporary unavailable",
+        "internal server error", "502", "503", "504", "connection aborted"
+    ])
+
+
 def _is_fatal_gemini_error(err_str: str) -> bool:
     """Return True if the error message indicates a non-transient error we should not retry."""
     s = (err_str or "").lower()
@@ -444,7 +474,7 @@ def _is_fatal_gemini_error(err_str: str) -> bool:
     return any(k in s for k in fatal_keywords)
 
 
-def call_gemini(prompt, testing, exam_name, chunks, retries=3):
+def call_gemini(prompt, testing, exam_name, chunks, retries=MAX_GEMINI_RETRIES):
     """Calls the Google Gemini (Generative AI) API with retries and robust error handling.
 
     Returns (response_content, system_prompt) on success.
@@ -507,19 +537,39 @@ def call_gemini(prompt, testing, exam_name, chunks, retries=3):
         except Exception as e:
             err_str = str(e)
             logging.exception("Gemini attempt %d failed: %s", attempt + 1, err_str)
-            # Decide whether to retry
+
             if _is_fatal_gemini_error(err_str):
                 logging.error("Fatal Gemini error detected, will not retry: %s", err_str)
                 raise
-            # transient: wait and retry if attempts remain
-            if attempt < retries - 1:
-                sleep_time = 2 ** attempt
-                logging.info("Retrying after %s seconds...", sleep_time)
-                time.sleep(sleep_time)
-                continue
-            # exhausted
-            logging.error("All Gemini retries exhausted")
-            raise RuntimeError("All Gemini API retries failed.")
+
+            if _is_rate_limit_error(err_str):
+                retry_delay = _extract_rate_limit_delay(err_str)
+                if retry_delay is None:
+                    retry_delay = 10.0
+                else:
+                    retry_delay = retry_delay + 1.0
+                logging.info("Gemini rate limit hit.")
+                logging.info("Waiting %.1f seconds before retrying...", retry_delay)
+                if attempt < retries - 1:
+                    logging.info("Retry attempt %d of %d", attempt + 2, retries)
+                    time.sleep(retry_delay)
+                    continue
+                logging.error("All Gemini retries exhausted")
+                raise RuntimeError("All Gemini API retries failed.")
+
+            if _is_transient_network_error(err_str):
+                if attempt < retries - 1:
+                    sleep_time = 2 ** attempt
+                    logging.info("Transient network error detected.")
+                    logging.info("Waiting %s seconds before retrying...", sleep_time)
+                    logging.info("Retry attempt %d of %d", attempt + 2, retries)
+                    time.sleep(sleep_time)
+                    continue
+                logging.error("All Gemini retries exhausted")
+                raise RuntimeError("All Gemini API retries failed.")
+
+            logging.error("Non-retryable Gemini error detected: %s", err_str)
+            raise
 
 # Note: do not expose legacy `call_gpt` alias — use `call_gemini` explicitly.
 
@@ -532,7 +582,7 @@ def handle_generation(prompts, TESTING, exam_name, questions_per_chunk: int):
     # questions_per_chunk = 5
     max_retries_per_chunk = 3
     
-    for qtype, prompt in prompts:
+    for prompt_index, (qtype, prompt) in enumerate(prompts):
         logging.info("Generating questions for type: %s", qtype)
         generated_chunk = None
         last_failed_chunk = []
@@ -593,6 +643,9 @@ def handle_generation(prompts, TESTING, exam_name, questions_per_chunk: int):
         # After the retry loop, check if we got a valid chunk
         if generated_chunk:
             all_questions.extend(generated_chunk)
+            if not TESTING and prompt_index < len(prompts) - 1:
+                logging.info("Waiting %s seconds between Gemini prompt requests.", REQUEST_DELAY_SECONDS)
+                time.sleep(REQUEST_DELAY_SECONDS)
         else:
             logging.error("Failed to generate a valid chunk for %s after %d attempts. Skipping.", qtype, max_retries_per_chunk)
             # Optionally, you could save the last failed response for debugging
