@@ -33,13 +33,13 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, '..', '..'))
 
 # Build absolute paths to ensure files are always found
-MODEL = os.getenv("GENIE_MODEL", "gemini-2.5-flash-lite")
+MODEL = os.getenv("GENIE_MODEL", "gemini-3.1-flash-lite")
 MAX_GEMINI_RETRIES = int(os.getenv("MAX_GEMINI_RETRIES", "3"))
 REQUEST_DELAY_SECONDS = int(os.getenv("REQUEST_DELAY_SECONDS", "7"))
 # Ensure only Gemini models are used; coerce/validate to avoid non-gemini model strings
 if MODEL and "gemini" not in MODEL.lower():
-    logging.warning("GENIE_MODEL appears to be non-Gemini ('%s'); defaulting to 'gemini-2.5-flash-lite'", MODEL)
-    MODEL = "gemini-2.5-flash-lite"
+    logging.warning("GENIE_MODEL appears to be non-Gemini ('%s'); defaulting to 'gemini-3.1-flash-lite'", MODEL)
+    MODEL = "gemini-3.1-flash-lite"
 SAVE_GENERATIONS_TO_DB = True
 # Prefer environment variable for API key
 API_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("API_KEY")
