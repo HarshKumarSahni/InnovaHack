@@ -32,9 +32,11 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, '..', '..'))
 
 # Build absolute paths to ensure files are always found
-# MODEL = 'gpt-4-turbo'
-MODEL = os.getenv("GENIE_MODEL") or os.getenv("MODEL") or "gemini-2.5-flash"
-# SAVE_GENERATIONS_TO_DB = True
+MODEL = os.getenv("GENIE_MODEL", "gemini-2.5-flash")
+# Ensure only Gemini models are used; coerce/validate to avoid non-gemini model strings
+if MODEL and "gemini" not in MODEL.lower():
+    logging.warning("GENIE_MODEL appears to be non-Gemini ('%s'); defaulting to 'gemini-2.5-flash'", MODEL)
+    MODEL = "gemini-2.5-flash"
 SAVE_GENERATIONS_TO_DB = True
 # Prefer environment variable for API key
 API_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("API_KEY")
@@ -131,7 +133,7 @@ def validate_topic_capacity(plan, total_topics, questions_per_chunk: int):
         raise ValueError(error_msg)
 
 def build_prompt_from_template(topics_list, template_key, num_of_questions, EXAM):
-    """Builds a GPT prompt from a template with the given topics."""
+    """Builds a Gemini prompt from a template with the given topics."""
     topics_str = "\n".join([f"{i+1}. {topic}" for i, topic in enumerate(topics_list)])
     randomized_answer_key = ', '.join(str(n) for n in random.choices(range(1, 5), k=num_of_questions))
     template = prompt_templates.get(template_key, "")
@@ -139,14 +141,14 @@ def build_prompt_from_template(topics_list, template_key, num_of_questions, EXAM
 
 
 def build_live_quiz_prompt(topics_list, template_key, num_of_questions, EXAM):
-    """Builds a GPT prompt for generating a live quiz in JSON format."""
+    """Builds a Gemini prompt for generating a live quiz in JSON format."""
     topics_str = "\n".join([f"{i+1}. {topic}" for i, topic in enumerate(topics_list)])
     template = prompt_templates.get(template_key, "")
     return template.format(topics=topics_str, num=num_of_questions, exam=EXAM)
 
 
 def parse_quiz_response(raw_text: str) -> List[Dict[str, Any]]:
-    """Parses raw GPT response into structured quiz questions."""
+    """Parses raw Gemini response into structured quiz questions."""
     try:
         data = json.loads(raw_text)
         questions = data.get("questions")
@@ -168,7 +170,7 @@ def parse_quiz_response(raw_text: str) -> List[Dict[str, Any]]:
 
 
 def generate_all_prompts(plan, topics, exam, questions_per_chunk: int, live_mode: bool = False):
-    """Generates a list of all prompts to be sent to the GPT API."""
+    """Generates a list of all prompts to be sent to the Gemini API."""
     prompts = []
     topic_index = 0
     shuffled_topics = random.sample(topics, len(topics))
@@ -188,7 +190,7 @@ def generate_all_prompts(plan, topics, exam, questions_per_chunk: int, live_mode
 
 
 def extract_json_object(raw_text: str) -> str:
-    """Attempts to isolate a JSON object from the raw GPT text output."""
+    """Attempts to isolate a JSON object from the raw Gemini text output."""
     if not raw_text or "{" not in raw_text:
         return raw_text
     start = raw_text.find("{")
@@ -209,7 +211,7 @@ def generate_live_quiz_task(topics: List[str], exam_name: str, question_count: i
     formatted_topics = "\n".join([f"{i+1}. {topic}" for i, topic in enumerate(topics)])
     prompt = live_template.format(topics=formatted_topics, num=question_count, exam=exam_name)
 
-    response_content, system_prompt = call_gpt(prompt, testing_mode, exam_name, 1)
+    response_content, system_prompt = call_gemini(prompt, testing_mode, exam_name, 1)
     if not testing_mode:
         save_raw_response(response_content)
         log_generation_to_db(
@@ -344,11 +346,11 @@ def save_to_pdf(content, filename):
         raise IOError(f"❌ Cannot save PDF to {path}. Details: {e}")
 
 def save_raw_response(text, folder=RAW_RESPONSES_DIR):
-    """Saves the raw GPT response for debugging purposes."""
+    """Saves the raw Gemini response for debugging purposes."""
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     file_id = uuid.uuid4().hex[:6]
-    # filename = f"gpt_response_{timestamp}.docx"
-    filename = f"gpt_response_{timestamp}_{file_id}.pdf"
+    # filename = f"gemini_response_{timestamp}.docx"
+    filename = f"gemini_response_{timestamp}_{file_id}.pdf"
     path = os.path.join(folder, filename)
     # doc = Document()
     # doc.add_paragraph(text)
@@ -385,7 +387,7 @@ def log_generation_to_db(system_prompt: str, user_prompt: str, response_content:
     elif not SAVE_GENERATIONS_TO_DB:
         logging.info("Skipping MongoDB log (master flag is OFF).")
 
-# === GPT HANDLING ===
+# === Gemini handling ===
 def _extract_response_text(response) -> str:
     """Robustly extract textual output from a Gemini/generativeai response object.
 
@@ -442,11 +444,10 @@ def _is_fatal_gemini_error(err_str: str) -> bool:
     return any(k in s for k in fatal_keywords)
 
 
-def call_gpt(prompt, testing, exam_name, chunks, retries=3):
-    """Calls the Google Generative AI API with retries and robust error handling.
+def call_gemini(prompt, testing, exam_name, chunks, retries=3):
+    """Calls the Google Gemini (Generative AI) API with retries and robust error handling.
 
-    Returns (response_content, system_prompt) on success. Preserves the previous
-    interface.
+    Returns (response_content, system_prompt) on success.
     """
     if testing:
         time.sleep(1)
@@ -520,10 +521,12 @@ def call_gpt(prompt, testing, exam_name, chunks, retries=3):
             logging.error("All Gemini retries exhausted")
             raise RuntimeError("All Gemini API retries failed.")
 
+# Note: do not expose legacy `call_gpt` alias — use `call_gemini` explicitly.
+
 
 # === CORE EXECUTION LOGIC ===
 def handle_generation(prompts, TESTING, exam_name, questions_per_chunk: int):
-    """Handles the question generation loop, calling GPT for each prompt."""
+    """Handles the question generation loop, calling Gemini for each prompt."""
     all_questions = []
     skipped_chunks = []
     # questions_per_chunk = 5
@@ -539,11 +542,11 @@ def handle_generation(prompts, TESTING, exam_name, questions_per_chunk: int):
         for attempt in range(max_retries_per_chunk):
             try:
                 logging.info("Attempt %d for %s...", attempt + 1, qtype)
-                response, system_prompt_used = call_gpt(prompt, TESTING, exam_name, questions_per_chunk)
+                response, system_prompt_used = call_gemini(prompt, TESTING, exam_name, questions_per_chunk)
                 
-                if response is None: # Handle potential failure from call_gpt retries
-                    logging.error("call_gpt failed for %s after all retries.", qtype)
-                    last_failed_chunk = [f"--- GPT CALL FAILED ---", f"Prompt Type: {qtype}"]
+                if response is None: # Handle potential failure from call_gemini retries
+                    logging.error("call_gemini failed for %s after all retries.", qtype)
+                    last_failed_chunk = [f"--- GEMINI CALL FAILED ---", f"Prompt Type: {qtype}"]
                     continue # Move to the next attempt or fail the chunk
                 
                 if not TESTING:
@@ -553,7 +556,7 @@ def handle_generation(prompts, TESTING, exam_name, questions_per_chunk: int):
                 last_failed_chunk = questions
                 
             #     if len(questions) != questions_per_chunk:
-            #         print(f"⚠️ GPT returned {len(questions)} questions instead of {questions_per_chunk}. Skipping this chunk.")
+            #         print(f"⚠️ Gemini returned {len(questions)} questions instead of {questions_per_chunk}. Skipping this chunk.")
             #         skipped_chunks.append(questions)
             #         continue
                 
@@ -576,11 +579,11 @@ def handle_generation(prompts, TESTING, exam_name, questions_per_chunk: int):
                          )
                     break # <<-- Exit the retry loop on success
                 else:
-                    logging.warning("Validation failed: GPT returned %d questions instead of %d. Retrying...", len(questions), questions_per_chunk)
+                    logging.warning("Validation failed: Gemini returned %d questions instead of %d. Retrying...", len(questions), questions_per_chunk)
                     time.sleep(1) # Optional: wait a moment before retrying
 
             except Exception as e:
-                logging.exception("An error occurred during GPT call for %s: %s", qtype, e)
+                logging.exception("An error occurred during Gemini call for %s: %s", qtype, e)
                 if attempt < max_retries_per_chunk - 1:
                     time.sleep(2) # Wait longer if there's an actual API error
         

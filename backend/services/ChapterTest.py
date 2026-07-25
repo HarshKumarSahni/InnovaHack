@@ -6,7 +6,7 @@ from datetime import datetime
 from docx import Document
 import winsound
 
-from Generation import call_gpt, save_response, save_to_docx, check_file_access, GenerationMain
+from Generation import call_gemini, save_response, save_to_docx, check_file_access, GenerationMain
 from PromptsDict import prompt_templates
 
 TESTING = True
@@ -141,7 +141,7 @@ def ChapterTestMain():
             print(prompt)
 
             try:
-                response = call_gpt(prompt, TESTING, 3)
+                response = call_gemini(prompt, TESTING, 3)
                 save_response(response)
             except Exception as e:
                 print(e)
@@ -169,7 +169,7 @@ def ChapterTestMain():
             continue
         joined_chunk = "\n\n".join(chunk)
         try:
-            verified_output += call_gpt(verify_prompt(joined_chunk),TESTING, 3) + "\n\n"
+            verified_output += call_gemini(verify_prompt(joined_chunk),TESTING, 3) + "\n\n"
         except Exception as e:
             print(e)
             winsound.PlaySound("WrongBuzzer.wav", winsound.SND_FILENAME)
