@@ -543,6 +543,9 @@ def handle_generation(prompts, TESTING, exam_name, questions_per_chunk: int):
             try:
                 logging.info("Attempt %d for %s...", attempt + 1, qtype)
                 response, system_prompt_used = call_gemini(prompt, TESTING, exam_name, questions_per_chunk)
+                logging.info("========== RAW GEMINI ==========")
+                logging.info(response)
+                logging.info("===============================")
                 
                 if response is None: # Handle potential failure from call_gemini retries
                     logging.error("call_gemini failed for %s after all retries.", qtype)
