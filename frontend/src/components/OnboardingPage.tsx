@@ -71,11 +71,11 @@ const OnboardingPage: React.FC<OnboardingPageProps> = ({ onBack, onComplete }) =
 
     console.log('Sending onboarding data:', backendData); // Debug log
 
-    const response = await fetch(`${API_BASE_URL}/onboarding`, {
+    const response = await fetch(`${API_BASE_URL}/api/onboarding`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}` // Fixed: proper Bearer token format
+        'Authorization': `Bearer ${token}`
       },
       body: JSON.stringify(backendData)
     });

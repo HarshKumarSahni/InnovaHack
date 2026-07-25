@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import LoginPage from './components/LoginPage';
 import SignupPage from './components/SignupPage';
 import OnboardingPage from './components/OnboardingPage';
-import Dashboard from './components/Dashboard';
+import HomePage from './pages/HomePage';
 
 // Types for user data
 interface User {
@@ -42,7 +42,7 @@ const App: React.FC = () => {
 
       try {
         // Verify token with backend and get user info
-        const response = await fetch(`${API_BASE_URL}/me`, {
+        const response = await fetch(`${API_BASE_URL}/api/me`, {
           headers: {
             'Authorization': `Bearer ${token}`
           }
@@ -207,9 +207,9 @@ const App: React.FC = () => {
     );
   }
 
-  // If user is logged in and has completed onboarding, show dashboard
+  // If user is logged in and has completed onboarding, show home page
   if (user && !showOnboarding) {
-    return <Dashboard user={user} onLogout={handleLogout} />;
+    return <HomePage user={user} onLogout={handleLogout} />;
   }
 
   // If user is not logged in, show login or signup page
