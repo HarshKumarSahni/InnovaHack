@@ -3,7 +3,7 @@ from sqlalchemy.orm import sessionmaker
 
 def main():
     # Create SQLAlchemy engine using the same connection string
-    engine = create_engine('DATABASE_URL=postgresql+psycopg2://postgres:5821@localhost:5432/InnovaHack')
+    engine = create_engine('DATABASE_URL=postgresql://acetrack_user:5lsmx6tqVkAKhDXGGiDxOhVgTPueQMmx@dpg-d9ifnunavr4c73ap3j90-a/acetrack?sslmode=require')
     
     # Method 1: Using engine.connect() (similar to your psycopg2 approach)
     with engine.connect() as conn:
