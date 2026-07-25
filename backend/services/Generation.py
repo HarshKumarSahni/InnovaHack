@@ -2,6 +2,7 @@
 import google.generativeai as generativeai
 import random
 import time
+import logging
 import textwrap
 import os
 import pandas as pd
@@ -32,11 +33,19 @@ PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, '..', '..'))
 
 # Build absolute paths to ensure files are always found
 # MODEL = 'gpt-4-turbo'
-MODEL = os.getenv("GENIE_MODEL", "gemini-2.5-free")
+MODEL = os.getenv("GENIE_MODEL") or os.getenv("MODEL") or "gemini-2.5-flash"
 # SAVE_GENERATIONS_TO_DB = True
 SAVE_GENERATIONS_TO_DB = True
-# API_KEY = os.getenv("API_KEY")
-API_KEY = "AIzaSyCTBwrau5U2kM5Sy-T6d7H2s-dIjC1nzNo"
+# Prefer environment variable for API key
+API_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("API_KEY")
+if API_KEY:
+    # configure logging about which model/key is in use (do not log key itself)
+    logging.basicConfig(level=logging.INFO)
+    logging.info("Generative model set to: %s", MODEL)
+else:
+    # don't fail at import time; validation occurs before calls
+    logging.basicConfig(level=logging.INFO)
+    logging.warning("GOOGLE_API_KEY not set. Generation calls will raise until configured.")
 # questions_per_chunk = 5 
 # questions_per_chunk = 3 # change to 5 when on production level
 
@@ -60,7 +69,7 @@ os.makedirs(RAW_RESPONSES_DIR, exist_ok=True)
 try:
     MONGO_CONNECTION_STRING = os.getenv("MONGO_URI")
     if not MONGO_CONNECTION_STRING:
-        print("⚠️ MONGO_URI not set. Logging disabled.")
+        logging.warning("MONGO_URI not set. Logging disabled.")
         mongo_client = None
     else:
         # Added tlsAllowInvalidCertificates for local dev SSL issues
@@ -84,11 +93,11 @@ try:
         )
         # Verify connection
         mongo_client.admin.command('ping')
-        print("✅ MongoDB connection successful.")
+        logging.info("MongoDB connection successful.")
         db = mongo_client["acetrack_finetune_db"]
         finetune_collection = db["generation_logs"]
 except Exception as e:
-    print(f"❌ MongoDB connection failed: {type(e).__name__} - {e}")
+    logging.exception("MongoDB connection failed: %s", e)
     mongo_client = None
 # ===============================================================
 cloudinary.config(
@@ -352,9 +361,9 @@ def save_raw_response(text, folder=RAW_RESPONSES_DIR):
         encoded_text = text.encode('latin-1', 'replace').decode('latin-1')
         pdf.multi_cell(0, 5, txt=encoded_text)
         pdf.output(path)
-        print(f"✅ Raw response saved to: {path}")
+        logging.info("Raw response saved to: %s", path)
     except Exception as e:
-        print(f"❌ Failed to save raw response PDF. Details: {e}")
+        logging.exception("Failed to save raw response PDF. Details: %s", e)
 
 def log_generation_to_db(system_prompt: str, user_prompt: str, response_content: str, exam_name: str, model_name: str, testing: bool):
     """Logs a successful prompt/response pair to MongoDB if enabled."""
@@ -368,18 +377,77 @@ def log_generation_to_db(system_prompt: str, user_prompt: str, response_content:
                 "model": model_name,
                 "created_at": datetime.now()
             })
-            print("  -> ✅ Logged generation pair to MongoDB.")
+            logging.info("Logged generation pair to MongoDB.")
         except OperationFailure as e:
-            print(f"  -> ⚠️ Failed to log to MongoDB (OperationFailure): {e.details}")
+            logging.warning("Failed to log to MongoDB (OperationFailure): %s", getattr(e, 'details', str(e)))
         except Exception as e:
-            print(f"  -> ⚠️ Failed to log to MongoDB (General Error): {e}")
+            logging.exception("Failed to log to MongoDB (General Error): %s", e)
     elif not SAVE_GENERATIONS_TO_DB:
-        print("  -> 🟡 Skipping MongoDB log (master flag is OFF).")
+        logging.info("Skipping MongoDB log (master flag is OFF).")
 
 # === GPT HANDLING ===
-def call_gpt(prompt, testing, exam_name, chunks, retries=3):
-    """Calls the Gemini 2.5 Free API with a given prompt, with retries."""
+def _extract_response_text(response) -> str:
+    """Robustly extract textual output from a Gemini/generativeai response object.
 
+    The SDK returns different shapes across versions; try common attributes then
+    fall back to stringifying the response.
+    """
+    try:
+        # Older style: response.output[0].content[0].text
+        if hasattr(response, "output") and response.output:
+            first_output = response.output[0]
+            content = getattr(first_output, "content", None)
+            if content:
+                if isinstance(content, (list, tuple)) and len(content) > 0:
+                    item = content[0]
+                    text = getattr(item, "text", None)
+                    if text:
+                        return text
+                    if isinstance(item, dict):
+                        return item.get("text") or json.dumps(item)
+                elif isinstance(content, str):
+                    return content
+
+        # Newer SDK: response.candidates or response.generations
+        if hasattr(response, "candidates") and response.candidates:
+            cand = response.candidates[0]
+            # candidate may be object or dict
+            text = getattr(cand, "content", None) or getattr(cand, "text", None)
+            if isinstance(text, str):
+                return text
+            if isinstance(text, (list, tuple)) and len(text) > 0 and isinstance(text[0], str):
+                return text[0]
+            if isinstance(cand, dict):
+                return cand.get("content") or cand.get("text") or json.dumps(cand)
+
+        # Fallbacks
+        if hasattr(response, "text") and isinstance(response.text, str):
+            return response.text
+        # Last resort
+        return str(response)
+    except Exception:
+        logging.exception("Failed to extract text from Gemini response")
+        return str(response)
+
+
+def _is_fatal_gemini_error(err_str: str) -> bool:
+    """Return True if the error message indicates a non-transient error we should not retry."""
+    s = (err_str or "").lower()
+    # common fatal conditions
+    fatal_keywords = [
+        "invalid", "api key", "authentication", "not authorized", "permission denied",
+        "model not found", "model doesn't exist", "model not available", "invalid model",
+        "400", "400 bad request"
+    ]
+    return any(k in s for k in fatal_keywords)
+
+
+def call_gpt(prompt, testing, exam_name, chunks, retries=3):
+    """Calls the Google Generative AI API with retries and robust error handling.
+
+    Returns (response_content, system_prompt) on success. Preserves the previous
+    interface.
+    """
     if testing:
         time.sleep(1)
         simulated_questions = []
@@ -393,32 +461,64 @@ def call_gpt(prompt, testing, exam_name, chunks, retries=3):
             })
         return json.dumps({"questions": simulated_questions}), f"You are a {exam_name} paper setter."
 
-    generativeai.configure(api_key=API_KEY)
+    # Validate API key early
+    if not API_KEY:
+        raise RuntimeError("GOOGLE_API_KEY environment variable is not configured.")
+
+    # configure SDK with the API key
+    try:
+        generativeai.configure(api_key=API_KEY)
+        model_obj = generativeai.GenerativeModel(MODEL)
+    except Exception as e:
+        logging.exception("Failed to configure GenerativeModel: %s", e)
+        raise
+
     system_prompt = f"You are a {exam_name} paper setter."
     full_prompt = f"{system_prompt}\n\n{prompt}"
+
     for attempt in range(retries):
         try:
-            response = generativeai.generate(
-                model=MODEL,
-                prompt=full_prompt,
-                temperature=0.7,
-                max_output_tokens=3000
-            )
-            response_content = ""
-            if hasattr(response, "output") and response.output:
-                first_output = response.output[0]
-                if hasattr(first_output, "content") and first_output.content:
-                    response_content = first_output.content[0].text
-                else:
-                    response_content = str(response.output)
+            logging.info("Calling Gemini model '%s' attempt %d", MODEL, attempt + 1)
+            # Prefer the modern `generate_content` API, but fall back to other methods on the model
+            if hasattr(model_obj, 'generate_content'):
+                response = model_obj.generate_content(
+                    full_prompt,
+                    generation_config={
+                        "temperature": 0.7,
+                        "max_output_tokens": 3000
+                    }
+                )
+            elif hasattr(model_obj, 'generate'):
+                # Older model objects may expose `generate` instead of `generate_content`
+                response = model_obj.generate(
+                    full_prompt,
+                    temperature=0.7,
+                    max_output_tokens=3000
+                )
+            elif hasattr(model_obj, 'predict'):
+                response = model_obj.predict(full_prompt)
             else:
-                response_content = str(response)
+                raise RuntimeError("GenerativeModel instance has no recognized generation method")
+
+            response_content = _extract_response_text(response)
             return response_content, system_prompt
+
         except Exception as e:
-            print(f"⚠️ Gemini attempt {attempt+1} failed: {e}")
+            err_str = str(e)
+            logging.exception("Gemini attempt %d failed: %s", attempt + 1, err_str)
+            # Decide whether to retry
+            if _is_fatal_gemini_error(err_str):
+                logging.error("Fatal Gemini error detected, will not retry: %s", err_str)
+                raise
+            # transient: wait and retry if attempts remain
             if attempt < retries - 1:
-                time.sleep(2)
-    raise RuntimeError("❌ All Gemini API retries failed.")
+                sleep_time = 2 ** attempt
+                logging.info("Retrying after %s seconds...", sleep_time)
+                time.sleep(sleep_time)
+                continue
+            # exhausted
+            logging.error("All Gemini retries exhausted")
+            raise RuntimeError("All Gemini API retries failed.")
 
 
 # === CORE EXECUTION LOGIC ===
@@ -430,7 +530,7 @@ def handle_generation(prompts, TESTING, exam_name, questions_per_chunk: int):
     max_retries_per_chunk = 3
     
     for qtype, prompt in prompts:
-        print(f"Generating questions for type: {qtype}")
+        logging.info("Generating questions for type: %s", qtype)
         generated_chunk = None
         last_failed_chunk = []
         response = None
@@ -438,11 +538,11 @@ def handle_generation(prompts, TESTING, exam_name, questions_per_chunk: int):
         
         for attempt in range(max_retries_per_chunk):
             try:
-                print(f"  -> Attempt {attempt + 1} for {qtype}...")
+                logging.info("Attempt %d for %s...", attempt + 1, qtype)
                 response, system_prompt_used = call_gpt(prompt, TESTING, exam_name, questions_per_chunk)
                 
                 if response is None: # Handle potential failure from call_gpt retries
-                    print(f"  -> ⚠️ call_gpt failed for {qtype} after all retries.")
+                    logging.error("call_gpt failed for %s after all retries.", qtype)
                     last_failed_chunk = [f"--- GPT CALL FAILED ---", f"Prompt Type: {qtype}"]
                     continue # Move to the next attempt or fail the chunk
                 
@@ -463,7 +563,7 @@ def handle_generation(prompts, TESTING, exam_name, questions_per_chunk: int):
             #     continue
                 # --- VALIDATION LOGIC ---
                 if len(questions) == questions_per_chunk:
-                    print(f"  ✅ Success! Got {len(questions)} questions.")
+                    logging.info("Success: got %d questions for %s.", len(questions), qtype)
                     generated_chunk = questions
                     if not TESTING and system_prompt_used: # Ensure system_prompt is available
                          log_generation_to_db(
@@ -476,11 +576,11 @@ def handle_generation(prompts, TESTING, exam_name, questions_per_chunk: int):
                          )
                     break # <<-- Exit the retry loop on success
                 else:
-                    print(f"  ⚠️ Validation failed: GPT returned {len(questions)} questions instead of {questions_per_chunk}. Retrying...")
+                    logging.warning("Validation failed: GPT returned %d questions instead of %d. Retrying...", len(questions), questions_per_chunk)
                     time.sleep(1) # Optional: wait a moment before retrying
 
             except Exception as e:
-                print(f"An error occurred during GPT call for {qtype}: {e}")
+                logging.exception("An error occurred during GPT call for %s: %s", qtype, e)
                 if attempt < max_retries_per_chunk - 1:
                     time.sleep(2) # Wait longer if there's an actual API error
         
@@ -488,7 +588,7 @@ def handle_generation(prompts, TESTING, exam_name, questions_per_chunk: int):
         if generated_chunk:
             all_questions.extend(generated_chunk)
         else:
-            print(f"❌ Failed to generate a valid chunk for {qtype} after {max_retries_per_chunk} attempts. Skipping.")
+            logging.error("Failed to generate a valid chunk for %s after %d attempts. Skipping.", qtype, max_retries_per_chunk)
             # Optionally, you could save the last failed response for debugging
             skipped_chunks.append(last_failed_chunk)
             
@@ -500,7 +600,7 @@ def handle_generation(prompts, TESTING, exam_name, questions_per_chunk: int):
 def run_generation_task(plan: dict, testing_mode: bool, exam_name: str, output_format: str, questions_per_chunk: int, topics: List[str]):
     """Main function to be called by the FastAPI """
     try:
-        print(f"Starting generation for {exam_name} with plan: {plan}")
+        logging.info("Starting generation for %s with plan: %s", exam_name, plan)
         
         run_id = uuid.uuid4().hex[:8]
         # questions_filename = f"Questions_{run_id}.docx"
@@ -529,7 +629,7 @@ def run_generation_task(plan: dict, testing_mode: bool, exam_name: str, output_f
             save_function("\n\n".join(generated_questions), questions_filename)
             # --- CLOUDINARY UPLOAD: Questions ---
             try:
-                print(f"Uploading {questions_filename} to Cloudinary...")
+                logging.info("Uploading %s to Cloudinary...", questions_filename)
                 upload_questions = cloudinary.uploader.upload(
                     os.path.join(OUTPUT_DIR, questions_filename),
                     resource_type="raw",
@@ -539,7 +639,7 @@ def run_generation_task(plan: dict, testing_mode: bool, exam_name: str, output_f
                 generated_files["questions"] = upload_questions.get("secure_url")
                 message = f"Successfully generated {len(generated_questions)} questions."
             except Exception as u_err:
-                print(f"⚠️ Cloudinary upload failed for questions: {u_err}")
+                logging.exception("Cloudinary upload failed for questions: %s", u_err)
                 generated_files["questions"] = questions_filename # Fallback to filename
             
         if skipped_chunks:
@@ -558,7 +658,7 @@ def run_generation_task(plan: dict, testing_mode: bool, exam_name: str, output_f
                 )
                 generated_files["skipped"] = upload_skipped.get("secure_url")
             except Exception as u_err:
-                print(f"⚠️ Cloudinary upload failed for skipped chunks: {u_err}")
+                logging.exception("Cloudinary upload failed for skipped chunks: %s", u_err)
                 generated_files["skipped"] = skipped_filename # Fallback
             
             
@@ -569,7 +669,7 @@ def run_generation_task(plan: dict, testing_mode: bool, exam_name: str, output_f
         else: # Create new message
                 message = f"Failed to generate questions, but {len(skipped_chunks)} skipped chunk(s) were saved."
 
-        print("\n✅ Mock Test Generation Completed.")
+        logging.info("Mock Test Generation Completed.")
         
         # if os.name == 'nt': # 'nt' is Windows
         #     try:
@@ -595,5 +695,5 @@ def run_generation_task(plan: dict, testing_mode: bool, exam_name: str, output_f
 
     except Exception as e:
         error_message = f"Question generation failed: {str(e)}"
-        print(f"❌ {error_message}")
+        logging.exception("%s", error_message)
         return {"success": False, "message": error_message, "files": {}}

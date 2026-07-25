@@ -101,7 +101,7 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
 
   // --- MODIFIED: Removed import.meta for compatibility ---
   // const API_BASE_URL = "http://localhost:10000";
-  const API_BASE_URL = "https://acetrack-backend.onrender.com";
+  const API_BASE_URL = "https://acetrack-backend-ixu9.onrender.com";
 
   // --- EFFECTS ---
   useEffect(() => {

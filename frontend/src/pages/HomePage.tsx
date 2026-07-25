@@ -46,7 +46,7 @@ interface OnboardingData {
   strongSubjects?: string[];
 }
 
-const API_BASE_URL = 'https://acetrack-backend.onrender.com';
+const API_BASE_URL = 'https://acetrack-backend-ixu9.onrender.com'; // Update this to your backend URL
 const numQuestionsChunk = 5;
 
 const HomePage: React.FC<HomePageProps> = ({ user, onLogout }) => {

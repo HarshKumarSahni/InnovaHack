@@ -13,7 +13,7 @@ The platform leverages **Large Language Models (LLMs)** to transform raw syllabu
 ## 🌐 Live Deployment
 
 * **Frontend:** [https://ace-track.vercel.app/](https://ace-track.vercel.app/)
-* **Backend API:** [https://acetrack-backend.onrender.com/](https://acetrack-backend.onrender.com/)
+* **Backend API:** [https://acetrack-backend-ixu9.onrender.com]
 
 ---
 
@@ -151,7 +151,7 @@ STUDYPLANNERAPP/
 1. **Clone the repository**
 
 ```bash
-git clone https://github.com/Adit1414/AceTrack.git
+git clone https://github.com/HarshKumarSahni/InnovaHack.git
 cd AceTrack
 ```
 
