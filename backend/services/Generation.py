@@ -32,11 +32,11 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, '..', '..'))
 
 # Build absolute paths to ensure files are always found
-MODEL = os.getenv("GENIE_MODEL", "gemini-2.5-flash")
+MODEL = os.getenv("GENIE_MODEL", "gemini-2.5-flash-lite")
 # Ensure only Gemini models are used; coerce/validate to avoid non-gemini model strings
 if MODEL and "gemini" not in MODEL.lower():
-    logging.warning("GENIE_MODEL appears to be non-Gemini ('%s'); defaulting to 'gemini-2.5-flash'", MODEL)
-    MODEL = "gemini-2.5-flash"
+    logging.warning("GENIE_MODEL appears to be non-Gemini ('%s'); defaulting to 'gemini-2.5-flash-lite'", MODEL)
+    MODEL = "gemini-2.5-flash-lite"
 SAVE_GENERATIONS_TO_DB = True
 # Prefer environment variable for API key
 API_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("API_KEY")
