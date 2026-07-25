@@ -8,7 +8,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, declarative_base
 
 # Option 1: Use environment variable (recommended for production)
-DATABASE_URL = os.getenv("DATABASE_URL", "")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg2://postgres:5821@localhost:5432/InnovaHack")
 
 
 engine = create_engine(

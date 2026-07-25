@@ -10,14 +10,12 @@ def run_migration():
             print("--- Adding is_authorized column to users table ---")
             connection.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_authorized BOOLEAN DEFAULT FALSE;"))
             
-            # Manually authorize your account (replace with your email)
-            print("--- Authorizing admin user ---")
-            # EDIT THIS LINE: Change 'vanneet@gmail.com' to your actual email
-            email_to_authorize = 'rad@gmail.com' 
-            connection.execute(text(f"UPDATE users SET is_authorized = TRUE WHERE email = '{email_to_authorize}';"))
+            # Authorize all existing users so generation features work immediately.
+            print("--- Authorizing all existing users ---")
+            connection.execute(text("UPDATE users SET is_authorized = TRUE WHERE is_authorized IS DISTINCT FROM TRUE;"))
             
             connection.commit()
-            print("✅ Migration successful! The column is added and your user is authorized.")
+            print("✅ Migration successful! The column is added and existing users are authorized.")
     except Exception as e:
         print(f"❌ Migration failed: {e}")
 

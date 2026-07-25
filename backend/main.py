@@ -18,12 +18,12 @@ from crud import (
 )
 from auth import verify_password, create_access_token, get_current_user_from_token
 
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from pydantic import BaseModel
 import os
 
 # Since uvicorn runs from 'src', Python can find MockTestAutomation directly
-from services.Generation import run_generation_task
+from services.Generation import run_generation_task, generate_live_quiz_task, grade_live_quiz_submission
 from services.PromptsDict import prompt_templates
 
 # Initialize Database
@@ -44,6 +44,27 @@ class QuestionGenerationResponse(BaseModel):
     success: bool
     message: str
     files: Optional[Dict[str, str]] = None
+
+class LiveQuizGenerationRequest(BaseModel):
+    topics: List[str]
+    exam_name: str
+    question_count: int = 10
+    testing_mode: bool = False
+
+class LiveQuizGenerationResponse(BaseModel):
+    success: bool
+    message: str
+    quiz: Optional[List[Dict[str, Any]]] = None
+
+class LiveQuizGradeRequest(BaseModel):
+    quiz: List[Dict[str, Any]]
+    answers: Dict[str, str]
+    exam_name: Optional[str] = "Practice"
+
+class LiveQuizGradeResponse(BaseModel):
+    success: bool
+    message: str
+    feedback: Dict[str, Any]
 
 class QuestionType(BaseModel):
     name: str
@@ -107,11 +128,8 @@ async def generate_questions(
 ):
     try:
         user = db.query(User).filter(User.id == current_user["user_id"]).first()
-        if not user or not user.is_authorized:
-            raise HTTPException(
-                status_code=403, 
-                detail="Your account does not have generation permissions yet. Please contact support."
-            )
+        if not user:
+            raise HTTPException(status_code=401, detail="Invalid user token")
         syllabus = get_syllabus_by_id(db, request.syllabus_id, current_user["user_id"])
         if not syllabus:
             raise HTTPException(status_code=404, detail="Syllabus not found or you don't have access to it")
@@ -127,6 +145,54 @@ async def generate_questions(
         if not result["success"]:
             raise HTTPException(status_code=500, detail=result["message"])
 
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
+
+@api_router.post("/generate-live-quiz", response_model=LiveQuizGenerationResponse)
+async def generate_live_quiz(
+    request: LiveQuizGenerationRequest,
+    current_user: dict = Depends(get_current_user_from_token),
+    db: Session = Depends(get_db)
+):
+    try:
+        user = db.query(User).filter(User.id == current_user["user_id"]).first()
+        if not user:
+            raise HTTPException(status_code=401, detail="Invalid user token")
+        result = generate_live_quiz_task(
+            topics=request.topics,
+            exam_name=request.exam_name,
+            question_count=request.question_count,
+            testing_mode=request.testing_mode,
+        )
+        if not result["success"]:
+            raise HTTPException(status_code=500, detail=result["message"])
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
+
+@api_router.post("/grade-live-quiz", response_model=LiveQuizGradeResponse)
+async def grade_live_quiz(
+    request: LiveQuizGradeRequest,
+    current_user: dict = Depends(get_current_user_from_token),
+    db: Session = Depends(get_db)
+):
+    try:
+        user = db.query(User).filter(User.id == current_user["user_id"]).first()
+        if not user:
+            raise HTTPException(status_code=401, detail="Invalid user token")
+
+        result = grade_live_quiz_submission(
+            quiz_questions=request.quiz,
+            answers=request.answers,
+            exam_name=request.exam_name,
+        )
+        if not result["success"]:
+            raise HTTPException(status_code=500, detail=result["message"])
         return result
     except HTTPException:
         raise
@@ -240,13 +306,26 @@ def create_user_onboarding(onboarding_data: OnboardingCreate, current_user: dict
     update_user_onboarding_status(db, user_id, True)
     return db_onboarding
 
-@api_router.get("/onboarding", response_model=OnboardingResponse)
-def get_user_onboarding(current_user: dict = Depends(get_current_user_from_token), db: Session = Depends(get_db)):
+# @api_router.get("/onboarding", response_model=OnboardingResponse)
+# def get_user_onboarding(current_user: dict = Depends(get_current_user_from_token), db: Session = Depends(get_db)):
+#     user_id = current_user["user_id"]
+#     onboarding_data = get_onboarding_data_by_user_id(db, user_id)
+#     if not onboarding_data: 
+#         raise HTTPException(status_code=404, detail="Onboarding data not found")
+#     return onboarding_data
+
+@api_router.get("/onboarding")
+def get_user_onboarding(
+    current_user: dict = Depends(get_current_user_from_token),
+    db: Session = Depends(get_db)
+):
     user_id = current_user["user_id"]
     onboarding_data = get_onboarding_data_by_user_id(db, user_id)
-    if not onboarding_data: 
-        raise HTTPException(status_code=404, detail="Onboarding data not found")
-    return onboarding_data
+
+    return {
+        "has_completed_onboarding": onboarding_data is not None,
+        "onboarding_data": onboarding_data
+    }
 
 @api_router.put("/onboarding", response_model=OnboardingResponse)
 def update_user_onboarding(onboarding_update: OnboardingUpdate, current_user: dict = Depends(get_current_user_from_token), db: Session = Depends(get_db)):

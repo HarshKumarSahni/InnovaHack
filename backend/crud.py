@@ -13,7 +13,7 @@ def get_user_by_id(db: Session, user_id: int):
 
 def create_user(db: Session, user: UserCreate):
     hashed_pw = hash_password(user.password)
-    db_user = User(email=user.email, hashed_password=hashed_pw)
+    db_user = User(email=user.email, hashed_password=hashed_pw, is_authorized=True)
     db.add(db_user)
     db.commit()
     db.refresh(db_user)

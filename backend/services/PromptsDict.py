@@ -292,6 +292,44 @@ Solution:
 •	Option 4 (Incorrect): BCNF handles anomalies due to overlapping candidate keys, but the case here is about transitive dependencies, not key overlaps. Also, multivalued dependencies are handled in Fourth Normal Form (4NF), not BCNF.
 Hence, Option (3) is the right answer.""",
 
+    "LIVE_QUIZ": """Live quiz JSON generator
+topics - 
+{topics}
+exam: {exam}
+create {num} multiple-choice questions on the topic(s) listed above.
+The output must be valid JSON only, with no extra explanation or text, using this exact schema:
+{
+  \"questions\": [
+    {
+      \"id\": \"q1\",
+      \"question\": \"...\",
+      \"options\": [\"A\", \"B\", \"C\", \"D\"],
+      \"correct_answer\": \"A\",
+      \"explanation\": \"...\"
+    }
+  ]
+}
+Each question must be analytical and exam-level. Provide exactly {num} questions. Use distinct options and ensure the correct answer matches the explanation. Do not include any additional text, titles, or formatting outside the JSON object.
+""",
+    "LIVE_FEEDBACK": """Live quiz feedback JSON generator
+exam: {exam}
+You are an expert education coach providing structured feedback on a user's quiz attempt.
+You are given the quiz questions, the user's selected answers, and the correct answers.
+Generate a JSON object only with the following structure:
+{
+  \"summary\": \"...\",
+  \"score_percent\": 0,
+  \"correct_count\": 0,
+  \"total_questions\": 0,
+  \"strengths\": [\"...\"],
+  \"gaps\": [\"...\"],
+  \"resources\": [\"...\"],
+  \"next_steps\": \"...\"
+}
+Focus on the student's strengths, the areas that need improvement, and suggest resources or study strategies. Also include a note about how difficulty should adapt if they continue practicing at this level.
+Do not output any extra text or markdown.
+""",
+
     "AR": """AR
 topics - 
 {topics}

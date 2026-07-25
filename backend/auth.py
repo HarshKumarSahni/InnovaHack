@@ -15,7 +15,7 @@ ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
 
 def hash_password(password: str) -> str:
     """Hash a password using bcrypt"""
@@ -46,6 +46,12 @@ def verify_token(token: str) -> dict:
 
 def get_current_user_from_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
     """Get current user from JWT token"""
+    if not credentials or not credentials.credentials:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authorization header missing or invalid",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     try:
         token = credentials.credentials
         payload = verify_token(token)

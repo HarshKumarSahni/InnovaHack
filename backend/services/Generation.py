@@ -1,4 +1,5 @@
-from openai import OpenAI
+# from openai import OpenAI
+import google.generativeai as generativeai
 import random
 import time
 import textwrap
@@ -13,7 +14,7 @@ import uuid
 # import winsound
 from pymongo import MongoClient, errors
 from pymongo.errors import ConnectionFailure, OperationFailure
-from typing import List
+from typing import List, Dict, Any, Optional
 import certifi
 import cloudinary
 import cloudinary.uploader
@@ -31,10 +32,11 @@ PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, '..', '..'))
 
 # Build absolute paths to ensure files are always found
 # MODEL = 'gpt-4-turbo'
-MODEL = os.getenv("OPENAI_MODEL", "gpt-4-turbo")
+MODEL = os.getenv("GENIE_MODEL", "gemini-2.5-free")
 # SAVE_GENERATIONS_TO_DB = True
 SAVE_GENERATIONS_TO_DB = True
-API_KEY = os.getenv("API_KEY")
+# API_KEY = os.getenv("API_KEY")
+API_KEY = "AIzaSyCTBwrau5U2kM5Sy-T6d7H2s-dIjC1nzNo"
 # questions_per_chunk = 5 
 # questions_per_chunk = 3 # change to 5 when on production level
 
@@ -126,23 +128,187 @@ def build_prompt_from_template(topics_list, template_key, num_of_questions, EXAM
     template = prompt_templates.get(template_key, "")
     return template.format(topics=topics_str, answer_key=randomized_answer_key, num=num_of_questions, exam=EXAM)
 
-def generate_all_prompts(plan, topics, exam, questions_per_chunk: int):
+
+def build_live_quiz_prompt(topics_list, template_key, num_of_questions, EXAM):
+    """Builds a GPT prompt for generating a live quiz in JSON format."""
+    topics_str = "\n".join([f"{i+1}. {topic}" for i, topic in enumerate(topics_list)])
+    template = prompt_templates.get(template_key, "")
+    return template.format(topics=topics_str, num=num_of_questions, exam=EXAM)
+
+
+def parse_quiz_response(raw_text: str) -> List[Dict[str, Any]]:
+    """Parses raw GPT response into structured quiz questions."""
+    try:
+        data = json.loads(raw_text)
+        questions = data.get("questions")
+        if not isinstance(questions, list):
+            raise ValueError("Parsed quiz output is missing questions array.")
+        validated_questions = []
+        for idx, item in enumerate(questions):
+            if not isinstance(item, dict):
+                raise ValueError(f"Question at index {idx} is not an object.")
+            required_keys = {"id", "question", "options", "correct_answer", "explanation"}
+            if not required_keys.issubset(set(item.keys())):
+                raise ValueError(f"Question at index {idx} is missing required fields.")
+            if not isinstance(item["options"], list):
+                raise ValueError(f"The options field for question {idx} is not a list.")
+            validated_questions.append(item)
+        return validated_questions
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Failed to parse quiz JSON response: {str(e)}")
+
+
+def generate_all_prompts(plan, topics, exam, questions_per_chunk: int, live_mode: bool = False):
     """Generates a list of all prompts to be sent to the GPT API."""
     prompts = []
     topic_index = 0
-    # questions_per_chunk = 5
-    
     shuffled_topics = random.sample(topics, len(topics))
-    
+
     for qtype, count in plan.items():
         if topic_index + ((count // questions_per_chunk) * questions_per_chunk) > len(shuffled_topics):
             raise ValueError("Topic index out of bounds. This indicates a logic error in topic validation.")
         for _ in range(count // questions_per_chunk):
-            chunk = shuffled_topics[topic_index : topic_index + questions_per_chunk]
+            chunk = shuffled_topics[topic_index: topic_index + questions_per_chunk]
             topic_index += questions_per_chunk
-            prompt = build_prompt_from_template(chunk, qtype, questions_per_chunk, exam)
+            if live_mode:
+                prompt = build_live_quiz_prompt(chunk, qtype, questions_per_chunk, exam)
+            else:
+                prompt = build_prompt_from_template(chunk, qtype, questions_per_chunk, exam)
             prompts.append((qtype, prompt))
     return prompts
+
+
+def extract_json_object(raw_text: str) -> str:
+    """Attempts to isolate a JSON object from the raw GPT text output."""
+    if not raw_text or "{" not in raw_text:
+        return raw_text
+    start = raw_text.find("{")
+    end = raw_text.rfind("}")
+    if start >= 0 and end > start:
+        return raw_text[start:end+1]
+    return raw_text
+
+
+def generate_live_quiz_task(topics: List[str], exam_name: str, question_count: int, testing_mode: bool):
+    """Generates a live quiz as structured JSON data."""
+    if not topics:
+        raise ValueError("At least one topic is required for a live quiz.")
+    live_template = prompt_templates.get("LIVE_QUIZ")
+    if not live_template:
+        raise ValueError("Live quiz prompt template is not configured.")
+
+    formatted_topics = "\n".join([f"{i+1}. {topic}" for i, topic in enumerate(topics)])
+    prompt = live_template.format(topics=formatted_topics, num=question_count, exam=exam_name)
+
+    response_content, system_prompt = call_gpt(prompt, testing_mode, exam_name, 1)
+    if not testing_mode:
+        save_raw_response(response_content)
+        log_generation_to_db(
+            system_prompt=system_prompt,
+            user_prompt=prompt,
+            response_content=response_content,
+            exam_name=exam_name,
+            model_name=MODEL,
+            testing=testing_mode,
+        )
+
+    cleaned_response = extract_json_object(response_content)
+    questions = parse_quiz_response(cleaned_response)
+    return {
+        "success": True,
+        "message": f"Generated {len(questions)} live quiz questions.",
+        "quiz": questions
+    }
+
+
+def normalize_answer(answer: Optional[str]) -> str:
+    return (answer or "").strip().upper()
+
+
+def build_feedback_summary(results: List[Dict[str, Any]], score_percent: float, exam_name: str) -> Dict[str, Any]:
+    strengths = []
+    gaps = []
+    for item in results:
+        if item.get("is_correct"):
+            strengths.append(
+                f"Question {item['id']} was answered correctly with option {item['selected']}.")
+        else:
+            gaps.append(
+                f"Question {item['id']} needs review: correct answer was {item['correct_answer']}, you selected {item['selected']}.")
+
+    if not strengths:
+        strengths = ["You showed good effort but should review the concepts behind the questions answered incorrectly."]
+    if not gaps:
+        gaps = ["No major gaps detected. Keep practicing at this difficulty level to reinforce your strengths."]
+
+    resources = [
+        "Review the explanations for any incorrect answers and revisit those topics in your study notes.",
+        "Use timed practice quizzes to improve speed and accuracy under exam-like conditions.",
+    ]
+    if score_percent < 70:
+        resources.append(
+            "Focus on core concepts and fundamentals before attempting another high-difficulty quiz.")
+    else:
+        resources.append(
+            "Continue with similar or slightly higher difficulty quizzes to push your performance further.")
+
+    next_steps = (
+        f"Your score is {score_percent}%. "
+        + ("Maintain this pace and practice similarly difficult questions to build mastery."
+           if score_percent >= 70 else
+           "Review the areas above and practice targeted concept questions before retaking a similar quiz.")
+    )
+
+    return {
+        "summary": (
+            f"You completed the {exam_name} practice quiz with a score of {score_percent}%.")
+            if exam_name else
+            f"You completed the practice quiz with a score of {score_percent}%.",
+        "score_percent": score_percent,
+        "strengths": strengths,
+        "gaps": gaps,
+        "resources": resources,
+        "next_steps": next_steps
+    }
+
+
+def grade_live_quiz_submission(quiz_questions: List[Dict[str, Any]], answers: Dict[str, str], exam_name: str):
+    """Generates structured feedback for a completed quiz submission."""
+    if not isinstance(quiz_questions, list):
+        raise ValueError("Quiz questions must be a list.")
+    if not isinstance(answers, dict):
+        raise ValueError("Answers must be provided as a dictionary.")
+
+    evaluated = []
+    correct_count = 0
+    for question in quiz_questions:
+        qid = question.get("id") or question.get("question", "unknown").strip()[:32]
+        correct_answer = normalize_answer(question.get("correct_answer"))
+        selected = normalize_answer(answers.get(qid))
+        is_correct = selected == correct_answer and correct_answer != ""
+        evaluated.append({
+            "id": qid,
+            "question": question.get("question"),
+            "selected": selected,
+            "correct_answer": correct_answer,
+            "is_correct": is_correct,
+            "explanation": question.get("explanation")
+        })
+        if is_correct:
+            correct_count += 1
+
+    total_questions = len(quiz_questions)
+    score_percent = round((correct_count / total_questions) * 100, 2) if total_questions > 0 else 0.0
+    feedback_data = build_feedback_summary(evaluated, score_percent, exam_name)
+    feedback_data.update({
+        "correct_count": correct_count,
+        "total_questions": total_questions,
+    })
+    return {
+        "success": True,
+        "message": "Quiz feedback generated successfully.",
+        "feedback": feedback_data
+    }
 
 # === FILE OPERATIONS ===
 def save_to_docx(content, filename):
@@ -212,40 +378,47 @@ def log_generation_to_db(system_prompt: str, user_prompt: str, response_content:
 
 # === GPT HANDLING ===
 def call_gpt(prompt, testing, exam_name, chunks, retries=3):
-    """Calls the OpenAI API with a given prompt, with retries."""
-    
+    """Calls the Gemini 2.5 Free API with a given prompt, with retries."""
+
     if testing:
         time.sleep(1)
-        return "\n\n".join([
-            f"--Question Starting--\nQ{i+1}. This is a sample test question for type {prompt[:3]}.\nAnswer: A\nExplanation: This is a test explanation."
-            for i in range(chunks)
-        ])
-    
-    # if not os.getenv("OPENAI_API_KEY"):
-    #     raise ValueError("OPENAI_API_KEY environment variable not set.")
+        simulated_questions = []
+        for i in range(chunks):
+            simulated_questions.append({
+                "id": f"q{i+1}",
+                "question": f"Sample question {i+1} based on prompt type {prompt[:3]}",
+                "options": ["A", "B", "C", "D"],
+                "correct_answer": "A",
+                "explanation": "This is a sample explanation."
+            })
+        return json.dumps({"questions": simulated_questions}), f"You are a {exam_name} paper setter."
 
-    client = OpenAI(api_key=API_KEY)
+    generativeai.configure(api_key=API_KEY)
     system_prompt = f"You are a {exam_name} paper setter."
+    full_prompt = f"{system_prompt}\n\n{prompt}"
     for attempt in range(retries):
         try:
-            response = client.chat.completions.create(
+            response = generativeai.generate(
                 model=MODEL,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": prompt}
-                ],
+                prompt=full_prompt,
                 temperature=0.7,
-                max_tokens=4000
+                max_output_tokens=3000
             )
-            response_content = response.choices[0].message.content
-
+            response_content = ""
+            if hasattr(response, "output") and response.output:
+                first_output = response.output[0]
+                if hasattr(first_output, "content") and first_output.content:
+                    response_content = first_output.content[0].text
+                else:
+                    response_content = str(response.output)
+            else:
+                response_content = str(response)
             return response_content, system_prompt
-        
         except Exception as e:
-            print(f"⚠️ GPT attempt {attempt+1} failed: {e}")
+            print(f"⚠️ Gemini attempt {attempt+1} failed: {e}")
             if attempt < retries - 1:
                 time.sleep(2)
-    raise RuntimeError("❌ All GPT API retries failed.")
+    raise RuntimeError("❌ All Gemini API retries failed.")
 
 
 # === CORE EXECUTION LOGIC ===
